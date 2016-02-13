@@ -1,6 +1,7 @@
 from neon.util.argparser import NeonArgparser
 from neon.initializers import Kaiming, IdentityInit
-from neon.layers import Conv, Pooling, GeneralizedCost, Affine, ResidualModule, Activation, Dropout
+from neon.layers import Conv, Pooling, GeneralizedCost, Activation
+from neon.layers import MergeSum, SkipNode
 from neon.optimizers import GradientDescentMomentum, Schedule
 from neon.transforms import Rectlin, Softmax, CrossEntropyMulti, TopKMisclassification
 from neon.models import Model
@@ -9,34 +10,33 @@ from neon.callbacks.callbacks import Callbacks
 
 # parse the command line arguments (generates the backend)
 parser = NeonArgparser(__doc__)
-parser.add_argument('--network', default='plain', choices=['plain', 'resnet'],
-                    help='type of network to create (plain or resnet)')
 parser.add_argument('--depth', type=int, default=9,
                     help='depth of each stage (network depth will be 6n+2)')
 args = parser.parse_args()
 
 # setup data provider
-imgset_options = dict(inner_size=112, scale_range=140, repo_dir=args.data_dir)
+imgset_options = dict(inner_size=112, repo_dir=args.data_dir)
 train = ImageLoader(set_name='train', shuffle=True, do_transforms=True,
-                   inner_size=112, scale_range=(128,240), repo_dir=args.data_dir)
+                    aspect_ratio=130, contrast_range=(75, 125), scale_range=(128,240),
+                    **imgset_options)
 
 test = ImageLoader(set_name='validation', shuffle=False, do_transforms=False,
-                  inner_size=112, scale_range=0, repo_dir=args.data_dir)
+                   scale_range=128, **imgset_options)
 
 
-def conv_params(fsize, nfm, stride=1, relu=True):
+def conv_params(fsize, nfm, stride=1, relu=True, batch_norm=True):
     return dict(fshape=(fsize, fsize, nfm), strides=stride, padding=(1 if fsize > 1 else 0),
                 activation=(Rectlin() if relu else None),
                 init=Kaiming(local=True),
-                batch_norm=True)
+                batch_norm=batch_norm)
 
 
 def module_factory(nfm, stride=1):
-    projection = None if stride == 1 else IdentityInit()
-    module = [Conv(**conv_params(3, nfm, stride=stride)),
-              Conv(**conv_params(3, nfm, relu=False))]
-    module = module if args.network == 'plain' else [ResidualModule(module, projection)]
-    module.append(Activation(Rectlin()))
+    mainpath = [Conv(**conv_params(3, nfm, stride=stride)),
+                Conv(**conv_params(3, nfm, relu=False))]
+    sidepath = [SkipNode() if stride == 1 else Conv(**conv_params(1, nfm, stride, relu=False))]
+    module = [MergeSum([mainpath, sidepath]),
+              Activation(Rectlin())]
     return module
 
 
@@ -46,23 +46,13 @@ nfms = [2**(stage + 5) for stage in sorted(range(4) * args.depth)]
 strides = [1] + [1 if cur == prev else 2 for cur, prev in zip(nfms[1:], nfms[:-1])]
 
 # Now construct the network
-from neon.layers import ColorNoise
-#layers = [ColorNoise()]
-layers = []
-layers += [Conv(**conv_params(3, 32, 2))]
+layers = [Conv(**conv_params(3, 32, 2))]
 for nfm, stride in zip(nfms, strides):
     layers.append(module_factory(nfm, stride))
 layers.append(Pooling(7, op='avg'))
-
-# for multiscale evaluation, uncomment these lines and comment out the 
-# affine layer. then change the scale_range of the validation set ImageLoader to 
-# be scale_range=desired_image_size. then use model.get_outputs to get the final softmax
-# outputs on the validation set.
-#layers.append(Conv(fshape=(1,1,100), init=Kaiming(local=True), batch_norm=True))
-#layers.append(Pooling(fshape='all', op='avg'))
-#layers.append(Activation(Softmax()))
-
-layers.append(Affine(nout=100, init=Kaiming(local=False), batch_norm=True, activation=Softmax()))
+layers.append(Conv(**conv_params(1, 100, relu=False, batch_norm=False)))
+# layers.append(Pooling('all', op='avg'))
+layers.append(Activation(Softmax()))
 
 model = Model(layers=layers)
 opt = GradientDescentMomentum(0.1, 0.9, wdecay=0.0005, schedule=Schedule([40, 70], 0.1))
