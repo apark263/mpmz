@@ -59,7 +59,7 @@ opt = GradientDescentMomentum(0.1, 0.9, wdecay=0.0005, schedule=Schedule([40, 70
 
 # configure callbacks
 valmetric = TopKMisclassification(k=5)
-callbacks = Callbacks(model, train, eval_set=test, metric=valmetric, **args.callback_args)
+callbacks = Callbacks(model, eval_set=test, metric=valmetric, **args.callback_args)
 callbacks.add_deconv_callback(train, test)
 
 cost = GeneralizedCost(costfunc=CrossEntropyMulti())
